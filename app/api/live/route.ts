@@ -22,7 +22,7 @@ type Trade = {
   amount: number;
 };
 
-const COINGECKO_BASE_URL = process.env.COINGECKO_API_BASE_URL || 'https://api.coingecko.com/api/v3';
+const COINGECKO_BASE_URL = process.env.COINGECKO_BASE_URL;
 
 const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY;
 
