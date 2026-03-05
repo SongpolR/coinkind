@@ -9,7 +9,7 @@ import { useState } from 'react';
 import CoinHeader from '@/components/CoinHeader';
 
 const LiveDataWrapper = ({ children, coinId, poolId, coin, coinOHLCData }: LiveDataProps) => {
-  const [liveInterval, setLiveInterval] = useState<'1s' | '1m'>('1s');
+  const [liveInterval, setLiveInterval] = useState<'1m' | '5m'>('1m');
 
   const { trades, ohlcv, price } = useCoinGeckoPolling({
     coinId,

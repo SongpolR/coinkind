@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-type LiveInterval = '1s' | '1m';
+type LiveInterval = '1m' | '5m';
 
 type ExtendedPriceData = {
   usd: number;
@@ -38,8 +38,8 @@ type UseCoinGeckoPollingReturn = {
 };
 
 function getPollMs(liveInterval: LiveInterval) {
-  if (liveInterval === '1s') return 5000;
-  return 15000;
+  if (liveInterval === '1m') return 60000;
+  return 300000;
 }
 
 export const useCoinGeckoPolling = ({
