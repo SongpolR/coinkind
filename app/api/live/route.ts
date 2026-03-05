@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-type LiveInterval = '1s' | '1m';
-type OHLCData = [number, number, number, number, number];
+type LiveInterval = '1m' | '5m';
+
+type OHLCData = [timestamp: number, open: number, high: number, low: number, close: number];
 
 type ExtendedPriceData = {
   usd: number;
@@ -25,7 +26,10 @@ const COINGECKO_BASE_URL = process.env.COINGECKO_API_BASE_URL || 'https://api.co
 
 const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY;
 
-// poolId format example: "eth_0x123abc..."
+type FetchJsonOptions = {
+  allow404?: boolean; // return null when 404
+};
+
 function parsePoolId(poolId?: string) {
   if (!poolId) return { network: '', poolAddress: '' };
 
@@ -37,29 +41,21 @@ function parsePoolId(poolId?: string) {
 }
 
 function getOhlcvParams(liveInterval: LiveInterval) {
-  if (liveInterval === '1s') {
-    return {
-      timeframe: 'second',
-      aggregate: '1',
-      limit: '1',
-    };
+  if (liveInterval === '1m') {
+    return { timeframe: 'minute', aggregate: '1', limit: '1' };
   }
-
-  return {
-    timeframe: 'minute',
-    aggregate: '1',
-    limit: '1',
-  };
+  return { timeframe: 'minute', aggregate: '5', limit: '1' };
 }
 
 function getHeaders() {
+  // Keep your demo header; swap to x-cg-pro-api-key later if you move plans
   return {
     accept: 'application/json',
     'x-cg-demo-api-key': COINGECKO_API_KEY || '',
   };
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, opts?: FetchJsonOptions): Promise<T | null> {
   const res = await fetch(url, {
     method: 'GET',
     headers: getHeaders(),
@@ -67,12 +63,26 @@ async function fetchJson<T>(url: string): Promise<T> {
     next: { revalidate: 0 },
   });
 
+  if (res.status === 404 && opts?.allow404) {
+    return null;
+  }
+
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`CoinGecko request failed: ${res.status} ${text}`);
   }
 
-  return res.json() as Promise<T>;
+  return (await res.json()) as T;
+}
+
+function isLikelyBadPool(network: string, poolAddress: string) {
+  if (!network || !poolAddress) return true;
+  if (network.toLowerCase().includes('deprecated')) return true;
+
+  // basic sanity for address-like pool id (optional but helpful)
+  if (!poolAddress.startsWith('0x') || poolAddress.length < 10) return true;
+
+  return false;
 }
 
 export async function GET(req: NextRequest) {
@@ -88,55 +98,53 @@ export async function GET(req: NextRequest) {
 
   const { network, poolAddress } = parsePoolId(poolId);
 
+  // --- PRICE (critical) ---
+  const priceUrl =
+    `${COINGECKO_BASE_URL}/simple/price` +
+    `?ids=${encodeURIComponent(coinId)}` +
+    `&vs_currencies=usd` +
+    `&include_market_cap=true` +
+    `&include_24hr_vol=true` +
+    `&include_24hr_change=true` +
+    `&include_last_updated_at=true`;
+
+  // --- POOL ENDPOINTS (best-effort) ---
+  const canFetchPool = !isLikelyBadPool(network, poolAddress);
+
+  const tradesUrl = canFetchPool
+    ? `${COINGECKO_BASE_URL}/onchain/networks/${encodeURIComponent(network)}` +
+      `/pools/${encodeURIComponent(poolAddress)}/trades`
+    : '';
+
+  const { timeframe, aggregate, limit } = getOhlcvParams(liveInterval);
+
+  const ohlcvUrl = canFetchPool
+    ? `${COINGECKO_BASE_URL}/onchain/networks/${encodeURIComponent(network)}` +
+      `/pools/${encodeURIComponent(poolAddress)}/ohlcv/${timeframe}` +
+      `?aggregate=${aggregate}&limit=${limit}&currency=usd&token=base&include_empty_intervals=true`
+    : '';
+
   try {
-    const priceUrl =
-      `${COINGECKO_BASE_URL}/simple/price` +
-      `?ids=${encodeURIComponent(coinId)}` +
-      `&vs_currencies=usd` +
-      `&include_market_cap=true` +
-      `&include_24hr_vol=true` +
-      `&include_24hr_change=true` +
-      `&include_last_updated_at=true`;
-
-    const pricePromise = fetchJson<
-      Record<
-        string,
-        {
-          usd?: number;
-          usd_market_cap?: number;
-          usd_24h_vol?: number;
-          usd_24h_change?: number;
-          last_updated_at?: number;
-        }
-      >
-    >(priceUrl);
-
-    let tradesPromise: Promise<any> | null = null;
-    let ohlcvPromise: Promise<any> | null = null;
-
-    if (network && poolAddress) {
-      const tradesUrl =
-        `${COINGECKO_BASE_URL}/onchain/networks/${encodeURIComponent(network)}` +
-        `/pools/${encodeURIComponent(poolAddress)}/trades`;
-
-      const { timeframe, aggregate, limit } = getOhlcvParams(liveInterval);
-
-      const ohlcvUrl =
-        `${COINGECKO_BASE_URL}/onchain/networks/${encodeURIComponent(network)}` +
-        `/pools/${encodeURIComponent(poolAddress)}/ohlcv/${timeframe}` +
-        `?aggregate=${aggregate}&limit=${limit}&currency=usd&token=base&include_empty_intervals=true`;
-
-      tradesPromise = fetchJson<any>(tradesUrl);
-      ohlcvPromise = fetchJson<any>(ohlcvUrl);
-    }
-
+    // Fetch price + pool data concurrently; pool requests tolerate 404
     const [priceRes, tradesRes, ohlcvRes] = await Promise.all([
-      pricePromise,
-      tradesPromise ?? Promise.resolve(null),
-      ohlcvPromise ?? Promise.resolve(null),
+      fetchJson<
+        Record<
+          string,
+          {
+            usd?: number;
+            usd_market_cap?: number;
+            usd_24h_vol?: number;
+            usd_24h_change?: number;
+            last_updated_at?: number;
+          }
+        >
+      >(priceUrl),
+
+      canFetchPool ? fetchJson<any>(tradesUrl, { allow404: true }) : Promise.resolve(null),
+      canFetchPool ? fetchJson<any>(ohlcvUrl, { allow404: true }) : Promise.resolve(null),
     ]);
 
-    const rawPrice = priceRes[coinId];
+    const rawPrice = priceRes?.[coinId];
 
     const price: ExtendedPriceData | null = rawPrice
       ? {
@@ -150,6 +158,7 @@ export async function GET(req: NextRequest) {
         }
       : null;
 
+    // trades: best-effort (empty if missing/404)
     const trades: Trade[] = Array.isArray(tradesRes?.data)
       ? tradesRes.data.slice(0, 7).map((item: any) => {
           const attrs = item?.attributes ?? {};
@@ -166,6 +175,7 @@ export async function GET(req: NextRequest) {
         })
       : [];
 
+    // ohlcv: best-effort (null if missing/404)
     const latestOhlcv = ohlcvRes?.data?.attributes?.ohlcv_list?.[0];
 
     const ohlcv: OHLCData | null = Array.isArray(latestOhlcv)
@@ -178,12 +188,9 @@ export async function GET(req: NextRequest) {
         ]
       : null;
 
-    return NextResponse.json({
-      price,
-      trades,
-      ohlcv,
-    });
+    return NextResponse.json({ price, trades, ohlcv });
   } catch (error) {
+    // Only truly critical failures should land here (usually price fetch or non-404 failures)
     console.error('[api/live] error:', error);
 
     return NextResponse.json(

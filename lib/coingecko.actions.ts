@@ -71,3 +71,90 @@ export async function getPools(
     return fallback;
   }
 }
+
+export async function searchCoins(query: string): Promise<SearchCoin[]> {
+  const trimmedQuery = query.trim();
+
+  if (!trimmedQuery) return [];
+
+  const searchResponse = await fetcher<{
+    coins?: Array<{
+      id: string;
+      name: string;
+      symbol: string;
+      market_cap_rank: number | null;
+      thumb: string;
+      large: string;
+    }>;
+  }>('search', { query: trimmedQuery }, 15);
+
+  const matchedCoins = (searchResponse.coins ?? []).slice(0, 10);
+
+  if (matchedCoins.length === 0) return [];
+
+  const ids = matchedCoins.map((coin) => coin.id).filter(Boolean);
+
+  const marketsResponse = await fetcher<
+    Array<{
+      id: string;
+      current_price?: number;
+      price_change_percentage_24h?: number | null;
+    }>
+  >(
+    'coins/markets',
+    {
+      vs_currency: 'usd',
+      ids: ids.join(','),
+      sparkline: false,
+      price_change_percentage: '24h',
+      per_page: ids.length,
+      page: 1,
+    },
+    15,
+  );
+
+  const marketMap = new Map(marketsResponse.map((coin) => [coin.id, coin]));
+
+  return matchedCoins.map((coin) => {
+    const market = marketMap.get(coin.id);
+
+    return {
+      id: coin.id,
+      name: coin.name,
+      symbol: coin.symbol?.toUpperCase?.() ?? coin.symbol,
+      market_cap_rank: coin.market_cap_rank ?? null,
+      thumb: coin.thumb,
+      large: coin.large,
+      data: {
+        price: market?.current_price ?? undefined,
+        price_change_percentage_24h: market?.price_change_percentage_24h ?? 0,
+      },
+    };
+  });
+}
+
+export async function getTrendingCoins(limit = 15): Promise<TrendingCoin[]> {
+  try {
+    // CoinGecko caches this endpoint ~10 minutes, so revalidate accordingly
+    const res = await fetcher<{ coins?: TrendingCoin[] }>('search/trending', undefined, 600);
+
+    const coins = res.coins ?? [];
+
+    // Keep only the top N (CoinGecko returns up to 15 on most plans)
+    return coins.slice(0, limit).map((entry) => ({
+      ...entry,
+      item: {
+        ...entry.item,
+        // normalize symbol for UI (optional)
+        symbol: entry.item.symbol?.toUpperCase?.() ?? entry.item.symbol,
+        // make sure data exists for UI reads
+        data: entry.item.data ?? {
+          price_change_percentage_24h: { usd: 0 },
+        },
+      },
+    }));
+  } catch (error) {
+    console.error('[getTrendingCoins] error:', error);
+    return [];
+  }
+}
